@@ -1,0 +1,22 @@
+# Build
+build/
+out/
+
+# IDE
+.vs/
+.vscode/
+.idea/
+*.suo
+*.user
+*.sdf
+*.opensdf
+
+# JUCE
+*_artefacts/
+
+# Windows
+Thumbs.db
+Desktop.ini
+
+# macOS
+.DS_Store
