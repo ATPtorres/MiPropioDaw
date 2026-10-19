@@ -49,7 +49,8 @@ target_sources(MiPropioDaw PRIVATE
     src/ui/panels/PatternSidebar.cpp
     src/ui/panels/ArrangementView.cpp
     src/ui/panels/MixerView.cpp
-    src/ui/panels/MidiEditorPanel.cpp)
+    src/ui/panels/MidiEditorPanel.cpp
+    src/ui/panels/SessionView.cpp)
 
 target_include_directories(MiPropioDaw PRIVATE src)
 

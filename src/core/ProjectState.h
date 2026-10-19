@@ -16,6 +16,7 @@ public:
     juce::ValueTree tracks()    const { return root.getChildWithName (IDs::tracks); }
     juce::ValueTree patterns()  const { return root.getChildWithName (IDs::patterns); }
     juce::ValueTree mixer()     const { return root.getChildWithName (IDs::mixer); }
+    juce::ValueTree session()   const { return root.getChildWithName (IDs::session); }
 
     // Todas las ediciones de usuario pasan por aquí para ser deshacibles.
     void setProperty (const juce::ValueTree& tree,
@@ -32,7 +33,8 @@ public:
 
     void removeChild (const juce::ValueTree& parent,
                       const juce::ValueTree& childToRemove,
-                      const juce::String& actionName);
+                      const juce::String& actionName,
+                      bool newTransaction = true);
 
     void performUndo();
     void performRedo();
@@ -50,6 +52,7 @@ public:
 
 private:
     void applyFrom (const juce::ValueTree& newRoot);
+    void ensureSessionDefaults();
     void setModified (bool shouldBeModified);
 
     bool modified = false;

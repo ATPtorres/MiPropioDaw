@@ -100,8 +100,34 @@ ProjectState::ProjectState()
     root.getOrCreateChildWithName (IDs::tracks,   nullptr);
     root.getOrCreateChildWithName (IDs::patterns, nullptr);
 
+    ensureSessionDefaults();
+
     auto mx = root.getOrCreateChildWithName (IDs::mixer, nullptr);
     mx.setProperty (IDs::masterGain, 0.0f, nullptr);
+}
+
+void ProjectState::ensureSessionDefaults()
+{
+    auto sn = root.getOrCreateChildWithName (IDs::session, nullptr);
+
+    if (! sn.hasProperty (IDs::quantize))
+        sn.setProperty (IDs::quantize, 4.0, nullptr);
+
+    if (sn.getNumChildren() == 0)
+    {
+        int nextSceneUid = (int) root.getProperty (IDs::uid, 0);
+        for (int i = 0; i < 4; ++i)
+        {
+            juce::ValueTree scene (IDs::scene);
+            scene.setProperty (IDs::uid,  ++nextSceneUid, nullptr);
+            scene.setProperty (IDs::name, juce::String (i + 1), nullptr);
+            sn.addChild (scene, -1, nullptr);
+        }
+        root.setProperty (IDs::uid, nextSceneUid, nullptr);
+    }
+
+    if (! root.hasProperty (IDs::viewMode))
+        root.setProperty (IDs::viewMode, "arrangement", nullptr);
 }
 
 void ProjectState::setProperty (const juce::ValueTree& tree,
@@ -140,12 +166,15 @@ void ProjectState::addChild (const juce::ValueTree& parent,
 
 void ProjectState::removeChild (const juce::ValueTree& parent,
                                 const juce::ValueTree& childToRemove,
-                                const juce::String& actionName)
+                                const juce::String& actionName,
+                                bool newTransaction)
 {
     if (! parent.isValid() || ! childToRemove.isValid())
         return;
 
-    undo.beginNewTransaction();
+    if (newTransaction)
+        undo.beginNewTransaction();
+
     undo.perform (new RemoveChildAction (parent, childToRemove), actionName);
     setModified (true);
 }
@@ -209,7 +238,7 @@ void ProjectState::applyFrom (const juce::ValueTree& newRoot)
 {
     root.copyPropertiesFrom (newRoot, nullptr);
 
-    const juce::Identifier names[] = { IDs::transport, IDs::tracks, IDs::patterns, IDs::mixer };
+    const juce::Identifier names[] = { IDs::transport, IDs::tracks, IDs::patterns, IDs::mixer, IDs::session };
 
     for (auto id : names)
     {
@@ -224,6 +253,8 @@ void ProjectState::applyFrom (const juce::ValueTree& newRoot)
         for (int i = 0; i < source.getNumChildren(); ++i)
             target.addChild (source.getChild (i).createCopy(), -1, nullptr);
     }
+
+    ensureSessionDefaults();
 }
 
 juce::String ProjectState::projectName() const

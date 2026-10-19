@@ -38,6 +38,28 @@ public:
     int clipCount() const;
     juce::ValueTree clipForUid (int uid) const;
 
+    juce::ValueTree session() const { return state.session(); }
+
+    int sceneCount() const;
+    juce::ValueTree sceneAt (int index) const;
+    juce::ValueTree sceneForUid (int uid) const;
+    int sceneIndexForUid (int uid) const;
+    juce::ValueTree addScene (const juce::String& name = {});
+    bool deleteScene (const juce::ValueTree& scene);
+    void renameScene (const juce::ValueTree& scene, const juce::String& newName);
+
+    juce::ValueTree addSessionClip (const juce::ValueTree& track, int sceneUid, int patternUid);
+    bool deleteSessionClip (const juce::ValueTree& track, const juce::ValueTree& clip);
+    juce::ValueTree sessionClipAt (const juce::ValueTree& track, int sceneUid) const;
+    juce::ValueTree sessionClipForUid (int uid) const;
+    int sessionClipCount() const;
+
+    float quantizeBeats() const;
+    void setQuantizeBeats (float beats);
+
+    juce::String viewMode() const;
+    void setViewMode (const juce::String& mode);
+
     int allocateUid();
 
     static juce::String uniqueName (const juce::ValueTree& patternsTree, const juce::String& base);

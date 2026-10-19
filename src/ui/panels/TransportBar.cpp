@@ -118,25 +118,38 @@ TransportBar::TransportBar (ProjectState& stateToUse, AudioEngine& engineToUse)
     settingsButton.onClick = [this] { if (onAudioSettings) onAudioSettings(); };
     addAndMakeVisible (settingsButton);
 
-    arrangementMode.setFont (Theme::font (11.0f, true));
-    arrangementMode.setColour (juce::Label::textColourId, Theme::text());
-    arrangementMode.setInterceptsMouseClicks (false, false);
-    addAndMakeVisible (arrangementMode);
+    arrangementButton.setColour (juce::TextButton::buttonColourId, Theme::panel());
+    arrangementButton.setColour (juce::TextButton::buttonOnColourId, Theme::panel());
+    arrangementButton.setColour (juce::TextButton::textColourOffId, Theme::textDim());
+    arrangementButton.setColour (juce::TextButton::textColourOnId, Theme::text());
+    arrangementButton.onClick = [this]
+    {
+        if (onViewModeChanged)
+            onViewModeChanged ("arrangement");
+    };
+    addAndMakeVisible (arrangementButton);
 
-    sessionMode.setFont (Theme::font (11.0f));
-    sessionMode.setColour (juce::Label::textColourId, Theme::textDim());
-    sessionMode.setInterceptsMouseClicks (false, false);
-    addAndMakeVisible (sessionMode);
+    sessionButton.setColour (juce::TextButton::buttonColourId, Theme::panel());
+    sessionButton.setColour (juce::TextButton::buttonOnColourId, Theme::panel());
+    sessionButton.setColour (juce::TextButton::textColourOffId, Theme::textDim());
+    sessionButton.setColour (juce::TextButton::textColourOnId, Theme::text());
+    sessionButton.onClick = [this]
+    {
+        if (onViewModeChanged)
+            onViewModeChanged ("session");
+    };
+    addAndMakeVisible (sessionButton);
 
-    transport.addListener (this);
+    state.root.addListener (this);
     refreshFromTree();
+    refreshMode();
 
     startTimerHz (20);
 }
 
 TransportBar::~TransportBar()
 {
-    transport.removeListener (this);
+    state.root.removeListener (this);
     stopTimer();
 }
 
@@ -147,12 +160,13 @@ void TransportBar::paint (juce::Graphics& g)
     g.setColour (Theme::border());
     g.fillRect (0, getHeight() - 1, getWidth(), 1);
 
-    // subrayado del modo activo
-    if (arrangementMode.isVisible())
+    auto* active = sessionButton.getToggleState() ? &sessionButton : &arrangementButton;
+
+    if (active->isVisible())
     {
         g.setColour (Theme::accent());
-        g.fillRect (arrangementMode.getX() + 6, arrangementMode.getBottom() + 2,
-                    arrangementMode.getWidth() - 12, 2);
+        g.fillRect (active->getX() + 6, active->getBottom() + 1,
+                    active->getWidth() - 12, 2);
     }
 }
 
@@ -213,13 +227,13 @@ void TransportBar::resized()
     cpuBar.setVisible (true);
     placeRight (cpuBar, 76, showMeta ? 12 : 0);
 
-    sessionMode.setVisible (getWidth() >= 1320);
-    arrangementMode.setVisible (getWidth() >= 1320);
+    sessionButton.setVisible (getWidth() >= 1320);
+    arrangementButton.setVisible (getWidth() >= 1320);
 
-    if (arrangementMode.isVisible())
+    if (sessionButton.isVisible())
     {
-        placeRight (sessionMode, 108, 14);
-        placeRight (arrangementMode, 96, 4);
+        placeRight (sessionButton, 84, 14);
+        placeRight (arrangementButton, 100, 4);
     }
 
     const int rightEnd = x;
@@ -294,7 +308,24 @@ void TransportBar::refreshFromTree()
     ignoreUiCallbacks = false;
 }
 
-void TransportBar::valueTreePropertyChanged (juce::ValueTree&, const juce::Identifier&)
+void TransportBar::refreshMode()
 {
-    refreshFromTree();
+    const bool session = state.root.getProperty (IDs::viewMode, "arrangement").toString() == "session";
+
+    arrangementButton.setToggleState (! session, juce::dontSendNotification);
+    sessionButton.setToggleState (session, juce::dontSendNotification);
+    repaint();
+}
+
+void TransportBar::valueTreePropertyChanged (juce::ValueTree& tree, const juce::Identifier& prop)
+{
+    if (tree == state.root)
+    {
+        if (prop == juce::Identifier (IDs::viewMode))
+            refreshMode();
+        return;
+    }
+
+    if (tree == transport)
+        refreshFromTree();
 }

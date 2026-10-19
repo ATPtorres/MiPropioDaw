@@ -46,6 +46,14 @@ inline constexpr const char* clip        = "clip";
 inline constexpr const char* uid         = "uid";
 inline constexpr const char* patternUid  = "patternUid";
 
+inline constexpr const char* viewMode    = "viewMode";
+
+inline constexpr const char* session     = "session";
+inline constexpr const char* scene       = "scene";
+inline constexpr const char* sessionClip = "sessionClip";
+inline constexpr const char* sceneUid    = "sceneUid";
+inline constexpr const char* quantize    = "quantize";
+
 // estado de vista del editor MIDI
 inline constexpr const char* scaleRoot   = "scaleRoot"; // 0..11 (C..B)
 inline constexpr const char* scaleId     = "scaleId";   // nombre de escala

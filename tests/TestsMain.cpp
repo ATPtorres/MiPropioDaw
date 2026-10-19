@@ -599,9 +599,203 @@ static void testScales()
     check (Scales::noteName (69) == "A4", "nombre de nota A4");
 }
 
+static void testSessionModel()
+{
+    std::cout << "[test] modelo de sesión (escenas y clips)\n";
+
+    ProjectState state;
+    AudioEngine engine;
+    TrackList tracks (state, engine);
+    engine.attachTracks (tracks.getTracks());
+    engine.attachPatterns (state.patterns());
+
+    PatternLibrary lib (state);
+
+    check (lib.sceneCount() == 4, "4 escenas por defecto");
+    check (lib.quantizeBeats() == 4.0f, "cuantización por defecto = 4 pulsos");
+    check (lib.viewMode() == "arrangement", "modo de vista por defecto");
+
+    auto scene5 = lib.addScene ("Intro");
+    check (scene5.isValid() && lib.sceneCount() == 5, "añadir escena");
+
+    lib.renameScene (scene5, "Drop");
+    auto renamed = lib.sceneForUid ((int) scene5.getProperty (IDs::uid, -1));
+    check (renamed.isValid() && renamed.getProperty (IDs::name, "").toString() == "Drop",
+           "renombrar escena");
+
+    const int sceneIndex = lib.sceneIndexForUid ((int) scene5.getProperty (IDs::uid, -1));
+    check (sceneIndex == 4, "índice de escena calculado");
+
+    auto track = tracks.addTrack ("midi");
+    auto pattern = lib.addPattern ("Beat", 1);
+    lib.addNote (pattern, 60, 0.0, 1.0, 0.9);
+
+    const int sceneUid = (int) scene5.getProperty (IDs::uid, -1);
+    const int puid = lib.uidOf (pattern);
+
+    auto clip = lib.addSessionClip (track, sceneUid, puid);
+    check (clip.isValid(), "clip de sesión creado");
+    check (lib.sessionClipCount() == 1, "1 clip de sesión");
+    check (lib.sessionClipAt (track, sceneUid).isValid(), "sessionClipAt lo encuentra");
+    check (lib.sessionClipForUid ((int) clip.getProperty (IDs::uid, -1)).isValid(),
+           "sessionClipForUid lo encuentra");
+
+    auto again = lib.addSessionClip (track, sceneUid, puid);
+    check (lib.sessionClipCount() == 1, "una sola celda por (pista, escena)");
+    check ((int) again.getProperty (IDs::uid, -1) == (int) clip.getProperty (IDs::uid, -1),
+           "la celda ocupada devuelve el clip existente");
+
+    check (lib.patternInUse (puid), "patternInUse incluye clips de sesión");
+    check (! lib.deletePattern (pattern), "no se borra un patrón en uso por sesión");
+
+    lib.setQuantizeBeats (2.0f);
+    check (lib.quantizeBeats() == 2.0f, "cuantización editable");
+
+    check (lib.deleteScene (scene5), "borrar escena");
+    check (lib.sceneCount() == 4, "escena eliminada");
+    check (lib.sessionClipCount() == 0, "los clips de la escena se borran con ella");
+
+    state.performUndo();
+    check (lib.sceneCount() == 5, "deshacer restaura la escena");
+    check (lib.sessionClipCount() == 1, "deshacer restaura sus clips");
+    check (lib.quantizeBeats() == 2.0f, "deshacer no afecta a la cuantización");
+
+    lib.setViewMode ("session");
+    check (lib.viewMode() == "session", "modo de vista guardado en la raíz");
+}
+
+static void testSessionSerialization()
+{
+    std::cout << "[test] guardar / cargar sesión\n";
+
+    ProjectState state;
+    AudioEngine engine;
+    TrackList tracks (state, engine);
+    engine.attachTracks (tracks.getTracks());
+    PatternLibrary lib (state);
+
+    auto track = tracks.addTrack ("midi");
+    auto pattern = lib.addPattern ("Loop", 1);
+    auto scene = lib.sceneAt (0);
+
+    lib.renameScene (scene, "A");
+    lib.addSessionClip (track, (int) scene.getProperty (IDs::uid, -1), lib.uidOf (pattern));
+    lib.setQuantizeBeats (1.0f);
+    lib.setViewMode ("session");
+
+    auto file = juce::File::getSpecialLocation (juce::File::tempDirectory)
+                    .getChildFile ("miproiodaw_session.dawproj");
+
+    check (state.save (file), "proyecto con sesión guardado");
+
+    ProjectState loaded;
+    check (loaded.load (file), "proyecto con sesión cargado");
+
+    PatternLibrary lib2 (loaded);
+    check (lib2.sceneCount() == 4, "escenas restauradas");
+    check (lib2.sceneAt (0).getProperty (IDs::name, "").toString() == "A", "nombre de escena restaurado");
+    check (lib2.sessionClipCount() == 1, "clip de sesión restaurado");
+    check (lib2.quantizeBeats() == 1.0f, "cuantización restaurada");
+    check (lib2.viewMode() == "session", "modo de vista restaurado");
+
+    loaded.root.removeChild (loaded.session(), nullptr);
+    loaded.root.removeProperty (IDs::viewMode, nullptr);
+
+    auto file2 = juce::File::getSpecialLocation (juce::File::tempDirectory)
+                     .getChildFile ("miproiodaw_v3.dawproj");
+
+    check (loaded.save (file2), "proyecto sin subtree de sesión guardado");
+
+    ProjectState oldLoaded;
+    check (oldLoaded.load (file2), "proyecto antiguo cargado");
+
+    PatternLibrary lib3 (oldLoaded);
+    check (oldLoaded.session().isValid(), "subtree de sesión creado al cargar");
+    check (lib3.sceneCount() == 4, "escenas por defecto creadas");
+    check (lib3.quantizeBeats() == 4.0f, "cuantización por defecto creada");
+    check (lib3.viewMode() == "arrangement", "modo de vista por defecto creado");
+
+    file.deleteFile();
+    file2.deleteFile();
+}
+
+static void testSessionLaunch()
+{
+    std::cout << "[test] lanzamiento de clips de sesión (motor)\n";
+
+    ProjectState state;
+    AudioEngine engine;
+    TrackList tracks (state, engine);
+    engine.attachTracks (tracks.getTracks());
+    engine.attachPatterns (state.patterns());
+
+    PatternLibrary lib (state);
+    auto track = tracks.addTrack ("midi");
+    const int slot = (int) track.getProperty (IDs::mixerSlot, -1);
+
+    auto pattern = lib.addPattern ("Loop", 1);
+    lib.addNote (pattern, 60, 0.0, 1.0, 0.9);
+    lib.addNote (pattern, 62, 2.0, 1.0, 0.9);
+    const int puid = lib.uidOf (pattern);
+
+    check (! engine.isSessionActive (slot), "inactivo al inicio");
+    check (engine.sessionQueuedPatternFor (slot) == -1, "sin cola al inicio");
+
+    engine.setSessionQuantize (0.0f);
+    engine.play();
+
+    engine.launchSessionClip (slot, puid);
+    int n = engine.processSession (0.0, 0.1, 256);
+    check (engine.isSessionActive (slot), "lanzamiento inmediato con cuantización Off");
+    check (engine.sessionPatternFor (slot) == puid, "patrón activo correcto");
+    check (engine.sessionQueuedPatternFor (slot) == -1, "sin cola tras activar");
+    check (n > 0, "evento de nota emitido en el primer bloque");
+
+    n = engine.processSession (0.1, 0.2, 256);
+    check (n == 0, "sin eventos entre notas");
+
+    check (engine.sessionLoopProgress (slot) >= 0.0f, "progreso del loop válido");
+
+    engine.stopSessionClip (slot);
+    engine.processSession (0.2, 0.3, 256);
+    check (! engine.isSessionActive (slot), "parada inmediata con cuantización Off");
+
+    engine.setSessionQuantize (4.0f);
+    engine.launchSessionClip (slot, puid);
+    engine.processSession (3.9, 3.95, 256);
+    check (! engine.isSessionActive (slot), "cuantización a compás: espera la frontera");
+    check (engine.sessionQueuedPatternFor (slot) == puid, "lanzamiento en cola");
+
+    n = engine.processSession (3.95, 4.05, 256);
+    check (engine.isSessionActive (slot), "activo en la frontera de compás");
+    check (engine.sessionQueuedPatternFor (slot) == -1, "cola consumida");
+    check (n > 0, "nota del loop emitida en la frontera");
+
+    engine.processSession (4.05, 4.1, 256);
+    check (engine.sessionLoopProgress (slot) > 0.0f, "progreso avanza");
+
+    n = engine.processSession (7.95, 8.05, 256);
+    check (engine.isSessionActive (slot), "sigue activo tras completar el loop");
+    check (n > 0, "evento emitido al dar la vuelta del loop");
+
+    engine.stopSessionClip (slot);
+    engine.processSession (8.05, 8.1, 256);
+    check (engine.isSessionActive (slot), "la parada espera su frontera");
+    engine.processSession (11.95, 12.05, 256);
+    check (! engine.isSessionActive (slot), "parada en la frontera de compás");
+
+    engine.launchSessionClip (slot, puid);
+    engine.processSession (12.05, 12.1, 256);
+    check (engine.sessionQueuedPatternFor (slot) == puid, "en cola tras relanzar");
+
+    engine.stop();
+    check (! engine.isSessionActive (slot), "stop del transporte detiene la sesión");
+    check (engine.sessionQueuedPatternFor (slot) == -1, "stop cancela lanzamientos en cola");
+}
+
 int main (int, char**)
 {
-    std::cout << "=== MiPropioDaw — tests de Fase 1 + 2 + 3 ===\n";
+    std::cout << "=== MiPropioDaw — tests de Fase 1 + 2 + 3 + 4 ===\n";
 
     testTrackCreationAndRouting();
     testUndoRedo();
@@ -623,6 +817,11 @@ int main (int, char**)
     testMidiSequence();
     testMidiSynth();
     testScales();
+
+    // Fase 4
+    testSessionModel();
+    testSessionSerialization();
+    testSessionLaunch();
 
     std::cout << "\n" << (gChecks - gFailures) << "/" << gChecks << " comprobaciones correctas\n";
 

@@ -21,10 +21,12 @@ public:
     std::function<void()> onSave;
     std::function<void()> onOpen;
     std::function<void()> onAudioSettings;
+    std::function<void(const juce::String&)> onViewModeChanged;
 
 private:
     void timerCallback() override;
     void refreshFromTree();
+    void refreshMode();
 
     void valueTreePropertyChanged (juce::ValueTree& treeWhosePropertyChanged,
                                    const juce::Identifier& property) override;
@@ -52,8 +54,8 @@ private:
     juce::TextButton openButton { "Open", {} };
     juce::TextButton settingsButton { "Audio...", {} };
 
-    juce::Label arrangementMode { {}, "ARRANGEMENT" };
-    juce::Label sessionMode     { {}, "SESSION (Fase 4)" };
+    juce::TextButton arrangementButton { "ARRANGEMENT", {} };
+    juce::TextButton sessionButton     { "SESSION", {} };
 
     bool ignoreUiCallbacks = false;
     bool editingBpm = false;

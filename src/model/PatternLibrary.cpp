@@ -78,7 +78,8 @@ bool PatternLibrary::patternInUse (int uid) const
         for (int c = 0; c < track.getNumChildren(); ++c)
         {
             auto clip = track.getChild (c);
-            if (clip.getType() == juce::Identifier (IDs::clip)
+            const auto type = clip.getType();
+            if ((type == juce::Identifier (IDs::clip) || type == juce::Identifier (IDs::sessionClip))
                 && (int) clip.getProperty (IDs::patternUid, -1) == uid)
                 return true;
         }
@@ -192,7 +193,11 @@ bool PatternLibrary::deleteClip (const juce::ValueTree& track, const juce::Value
 
 bool PatternLibrary::makeUnique (const juce::ValueTree& clip)
 {
-    if (! clip.isValid() || clip.getType() != juce::Identifier (IDs::clip))
+    if (! clip.isValid())
+        return false;
+
+    const auto type = clip.getType();
+    if (type != juce::Identifier (IDs::clip) && type != juce::Identifier (IDs::sessionClip))
         return false;
 
     const auto original = patternForUid ((int) clip.getProperty (IDs::patternUid, -1));
@@ -240,6 +245,182 @@ int PatternLibrary::allocateUid()
     const int next = (int) root.getProperty (IDs::uid, 0) + 1;
     root.setProperty (IDs::uid, next, nullptr);
     return next;
+}
+
+int PatternLibrary::sceneCount() const
+{
+    auto sn = session();
+    return sn.isValid() ? sn.getNumChildren() : 0;
+}
+
+juce::ValueTree PatternLibrary::sceneAt (int index) const
+{
+    auto sn = session();
+    if (! sn.isValid() || ! juce::isPositiveAndBelow (index, sn.getNumChildren()))
+        return {};
+    return sn.getChild (index);
+}
+
+juce::ValueTree PatternLibrary::sceneForUid (int uid) const
+{
+    auto sn = session();
+    if (! sn.isValid() || uid < 0)
+        return {};
+    return sn.getChildWithProperty (IDs::uid, uid);
+}
+
+int PatternLibrary::sceneIndexForUid (int uid) const
+{
+    auto sn = session();
+    if (! sn.isValid())
+        return -1;
+
+    for (int i = 0; i < sn.getNumChildren(); ++i)
+        if ((int) sn.getChild (i).getProperty (IDs::uid, -1) == uid)
+            return i;
+
+    return -1;
+}
+
+juce::ValueTree PatternLibrary::addScene (const juce::String& name)
+{
+    auto sn = session();
+    if (! sn.isValid())
+        return {};
+
+    juce::ValueTree scene (IDs::scene);
+    scene.setProperty (IDs::uid,  allocateUid(), nullptr);
+    scene.setProperty (IDs::name, name.isNotEmpty() ? name : juce::String (sceneCount() + 1), nullptr);
+
+    state.addChild (sn, scene, -1, "Add scene");
+
+    return sn.getChildWithProperty (IDs::uid, scene.getProperty (IDs::uid));
+}
+
+bool PatternLibrary::deleteScene (const juce::ValueTree& scene)
+{
+    if (! scene.isValid() || scene.getParent() != session())
+        return false;
+
+    const int uid = (int) scene.getProperty (IDs::uid, -1);
+
+    state.removeChild (session(), scene, "Delete scene");
+
+    auto all = tracks();
+    for (int i = 0; i < all.getNumChildren(); ++i)
+    {
+        auto track = all.getChild (i);
+        for (int c = track.getNumChildren() - 1; c >= 0; --c)
+        {
+            auto clip = track.getChild (c);
+            if (clip.getType() == juce::Identifier (IDs::sessionClip)
+                && (int) clip.getProperty (IDs::sceneUid, -1) == uid)
+                state.removeChild (track, clip, "Delete scene", false);
+        }
+    }
+
+    return true;
+}
+
+void PatternLibrary::renameScene (const juce::ValueTree& scene, const juce::String& newName)
+{
+    if (! scene.isValid() || scene.getParent() != session())
+        return;
+
+    state.setProperty (scene, IDs::name, newName, "Rename scene");
+}
+
+juce::ValueTree PatternLibrary::addSessionClip (const juce::ValueTree& track, int sceneUid, int patternUid)
+{
+    if (! track.isValid() || sceneUid < 0 || ! patternForUid (patternUid).isValid())
+        return {};
+
+    if (auto existing = sessionClipAt (track, sceneUid); existing.isValid())
+        return existing;
+
+    juce::ValueTree clip (IDs::sessionClip);
+    clip.setProperty (IDs::uid,         allocateUid(), nullptr);
+    clip.setProperty (IDs::patternUid,  patternUid, nullptr);
+    clip.setProperty (IDs::sceneUid,    sceneUid, nullptr);
+
+    state.addChild (track, clip, -1, "Add session clip");
+
+    return track.getChildWithProperty (IDs::uid, clip.getProperty (IDs::uid));
+}
+
+bool PatternLibrary::deleteSessionClip (const juce::ValueTree& track, const juce::ValueTree& clip)
+{
+    if (! track.isValid() || ! clip.isValid() || clip.getParent() != track
+        || clip.getType() != juce::Identifier (IDs::sessionClip))
+        return false;
+
+    state.removeChild (track, clip, "Delete session clip");
+    return true;
+}
+
+juce::ValueTree PatternLibrary::sessionClipAt (const juce::ValueTree& track, int sceneUid) const
+{
+    if (! track.isValid() || sceneUid < 0)
+        return {};
+
+    for (int c = 0; c < track.getNumChildren(); ++c)
+    {
+        auto clip = track.getChild (c);
+        if (clip.getType() == juce::Identifier (IDs::sessionClip)
+            && (int) clip.getProperty (IDs::sceneUid, -1) == sceneUid)
+            return clip;
+    }
+    return {};
+}
+
+juce::ValueTree PatternLibrary::sessionClipForUid (int uid) const
+{
+    auto all = tracks();
+    for (int i = 0; i < all.getNumChildren(); ++i)
+    {
+        auto track = all.getChild (i);
+        auto clip = track.getChildWithProperty (IDs::uid, uid);
+        if (clip.isValid() && clip.getType() == juce::Identifier (IDs::sessionClip))
+            return clip;
+    }
+    return {};
+}
+
+int PatternLibrary::sessionClipCount() const
+{
+    int n = 0;
+    auto all = tracks();
+    for (int i = 0; i < all.getNumChildren(); ++i)
+    {
+        auto track = all.getChild (i);
+        for (int c = 0; c < track.getNumChildren(); ++c)
+            if (track.getChild (c).getType() == juce::Identifier (IDs::sessionClip))
+                ++n;
+    }
+    return n;
+}
+
+float PatternLibrary::quantizeBeats() const
+{
+    auto sn = session();
+    return sn.isValid() ? (float) (double) sn.getProperty (IDs::quantize, 4.0) : 4.0f;
+}
+
+void PatternLibrary::setQuantizeBeats (float beats)
+{
+    auto sn = session();
+    if (sn.isValid())
+        state.setProperty (sn, IDs::quantize, (double) juce::jmax (0.0f, beats), "Set launch quantize");
+}
+
+juce::String PatternLibrary::viewMode() const
+{
+    return state.root.getProperty (IDs::viewMode, "arrangement").toString();
+}
+
+void PatternLibrary::setViewMode (const juce::String& mode)
+{
+    state.root.setProperty (IDs::viewMode, mode, nullptr);
 }
 
 juce::String PatternLibrary::uniqueName (const juce::ValueTree& patternsTree, const juce::String& base)

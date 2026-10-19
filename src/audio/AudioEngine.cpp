@@ -9,6 +9,21 @@ namespace
         return juce::File::getSpecialLocation (juce::File::userApplicationDataDirectory)
                    .getChildFile ("MiPropioDaw");
     }
+
+    // Devuelve la primera frontera de cuantización dentro de [b0, b1] o -1.
+    double nextQuantizeBoundary (double b0, double b1, double q)
+    {
+        if (q <= 0.0)
+            return b0;
+
+        const double n = std::floor (b0 / q + 1.0e-9);
+        double c = n * q;
+
+        if (c < b0 - 1.0e-9)
+            c += q;
+
+        return (c <= b1 + 1.0e-9) ? c : -1.0;
+    }
 }
 
 AudioEngine::AudioEngine()  = default;
@@ -18,6 +33,12 @@ AudioEngine::~AudioEngine()
     mgr.removeAudioCallback (this);
 
     for (auto& s : seqs)
+    {
+        delete s;
+        s = nullptr;
+    }
+
+    for (auto& s : sessionLoops)
     {
         delete s;
         s = nullptr;
@@ -160,6 +181,9 @@ void AudioEngine::activateFromTree (const juce::ValueTree& trackTree)
         if (isMidiTrack && seqs[(size_t) index] == nullptr)
             seqs[(size_t) index] = new SlotSequence();
 
+        if (isMidiTrack && sessionLoops[(size_t) index] == nullptr)
+            sessionLoops[(size_t) index] = new SessionLoop();
+
         syncSlotFromTree (trackTree);
         syncProChannelFromTree (trackTree);
         rebuildSequence (index);
@@ -248,6 +272,321 @@ void AudioEngine::rebuildAllSequences()
             rebuildSequence (i);
 }
 
+void AudioEngine::rebuildLoop (int slotIndex, int patternUid)
+{
+    if (! juce::isPositiveAndBelow (slotIndex, kMaxSlots) || patternUid < 0)
+        return;
+
+    auto* L = sessionLoops[(size_t) slotIndex];
+    if (L == nullptr || ! patternsTree.isValid())
+        return;
+
+    seqScratch.resize (SessionLoop::kMaxLoopEvents);
+
+    float loopBeats = 4.0f;
+    const int n = MidiSequence::buildLoop (patternsTree, patternUid,
+                                           seqScratch.data(), SessionLoop::kMaxLoopEvents, loopBeats);
+
+    const auto g = L->generation.load (std::memory_order_relaxed);
+    L->generation.store (g + 1, std::memory_order_release);
+
+    L->count     = n;
+    L->loopBeats = loopBeats;
+    std::memcpy (L->events.data(), seqScratch.data(), (size_t) n * sizeof (SeqEvent));
+
+    L->generation.store (g + 2, std::memory_order_release);
+}
+
+void AudioEngine::rebuildActiveLoops()
+{
+    for (int i = 0; i < kMaxSlots; ++i)
+    {
+        auto* L = sessionLoops[(size_t) i];
+        if (L == nullptr)
+            continue;
+
+        int uid = L->pendingPattern.load (std::memory_order_relaxed);
+        if (uid < 0 && L->active.load (std::memory_order_relaxed))
+            uid = L->activePattern.load (std::memory_order_relaxed);
+
+        if (uid >= 0)
+            rebuildLoop (i, uid);
+    }
+}
+
+void AudioEngine::releaseLoopNotes (int slotIndex, SessionLoop& loop)
+{
+    auto& s = slots[(size_t) juce::jlimit (0, kMaxSlots - 1, slotIndex)];
+
+    for (int p = 0; p < 128; ++p)
+    {
+        if (loop.sounding[(size_t) p] != 0)
+        {
+            s.synth.noteOff (p);
+            loop.sounding[(size_t) p] = 0;
+        }
+    }
+}
+
+void AudioEngine::launchSessionClip (int slot, int patternUid)
+{
+    if (! juce::isPositiveAndBelow (slot, kMaxSlots) || patternUid < 0)
+        return;
+
+    auto* L = sessionLoops[(size_t) slot];
+    if (L == nullptr)
+        return;
+
+    rebuildLoop (slot, patternUid);
+    L->pendingStop.store (false, std::memory_order_relaxed);
+    L->pendingPattern.store (patternUid, std::memory_order_release);
+}
+
+void AudioEngine::stopSessionClip (int slot)
+{
+    if (! juce::isPositiveAndBelow (slot, kMaxSlots))
+        return;
+
+    auto* L = sessionLoops[(size_t) slot];
+    if (L == nullptr)
+        return;
+
+    L->pendingPattern.store (-1, std::memory_order_release);
+    L->pendingStop.store (true, std::memory_order_relaxed);
+}
+
+void AudioEngine::stopAllSessionClips()
+{
+    for (auto* L : sessionLoops)
+    {
+        if (L == nullptr)
+            continue;
+
+        L->pendingPattern.store (-1, std::memory_order_release);
+        L->pendingStop.store (true, std::memory_order_relaxed);
+    }
+}
+
+void AudioEngine::resetSessionLoops()
+{
+    for (auto* L : sessionLoops)
+    {
+        if (L == nullptr)
+            continue;
+
+        L->active.store (false, std::memory_order_relaxed);
+        L->activePattern.store (-1, std::memory_order_relaxed);
+        L->pendingPattern.store (-1, std::memory_order_relaxed);
+        L->pendingStop.store (false, std::memory_order_relaxed);
+        L->progress.store (0.0f, std::memory_order_relaxed);
+        L->sounding.fill (0);
+    }
+}
+
+bool AudioEngine::isSessionActive (int slot) const
+{
+    if (! juce::isPositiveAndBelow (slot, kMaxSlots) || sessionLoops[(size_t) slot] == nullptr)
+        return false;
+
+    return sessionLoops[(size_t) slot]->active.load (std::memory_order_relaxed);
+}
+
+int AudioEngine::sessionQueuedPatternFor (int slot) const
+{
+    if (! juce::isPositiveAndBelow (slot, kMaxSlots) || sessionLoops[(size_t) slot] == nullptr)
+        return -1;
+
+    return sessionLoops[(size_t) slot]->pendingPattern.load (std::memory_order_relaxed);
+}
+
+int AudioEngine::sessionPatternFor (int slot) const
+{
+    if (! juce::isPositiveAndBelow (slot, kMaxSlots) || sessionLoops[(size_t) slot] == nullptr)
+        return -1;
+
+    auto* L = sessionLoops[(size_t) slot];
+    return L->active.load (std::memory_order_relaxed) ? L->activePattern.load (std::memory_order_relaxed) : -1;
+}
+
+float AudioEngine::sessionLoopProgress (int slot) const
+{
+    if (! juce::isPositiveAndBelow (slot, kMaxSlots) || sessionLoops[(size_t) slot] == nullptr)
+        return 0.0f;
+
+    return sessionLoops[(size_t) slot]->progress.load (std::memory_order_relaxed);
+}
+
+int AudioEngine::processSession (double b0, double b1, int numSamples, bool discontinuity)
+{
+    if (! (b1 > b0))
+        return 0;
+
+    const bool isPlayingNow = playing.load (std::memory_order_relaxed);
+    const float q = sessionQuantize.load (std::memory_order_relaxed);
+    int scheduled = 0;
+
+    for (int i = 0; i < kMaxSlots; ++i)
+    {
+        auto* L = sessionLoops[(size_t) i];
+        if (L == nullptr)
+            continue;
+
+        if (! isPlayingNow)
+        {
+            if (L->active.exchange (false, std::memory_order_acq_rel))
+            {
+                releaseLoopNotes (i, *L);
+                L->activePattern.store (-1, std::memory_order_relaxed);
+            }
+
+            L->pendingStop.store (false, std::memory_order_relaxed);
+            L->progress.store (0.0f, std::memory_order_relaxed);
+            continue;
+        }
+
+        if (discontinuity && L->active.load (std::memory_order_relaxed))
+            L->loopStartBeat = b0;
+
+        const bool stopReq = L->pendingStop.load (std::memory_order_relaxed);
+        const bool havePending = L->pendingPattern.load (std::memory_order_acquire) >= 0;
+
+        if (stopReq || havePending)
+        {
+            const double at = nextQuantizeBoundary (b0, b1, (double) q);
+
+            if (at >= 0.0)
+            {
+                if (stopReq)
+                {
+                    if (L->active.exchange (false, std::memory_order_acq_rel))
+                        releaseLoopNotes (i, *L);
+
+                    L->activePattern.store (-1, std::memory_order_relaxed);
+                    L->pendingPattern.store (-1, std::memory_order_release);
+                    L->pendingStop.store (false, std::memory_order_relaxed);
+                    L->progress.store (0.0f, std::memory_order_relaxed);
+                }
+                else
+                {
+                    int want = -1;
+                    for (int t = 0; t < 4; ++t)
+                    {
+                        const int cur = L->pendingPattern.load (std::memory_order_acquire);
+                        if (cur < 0)
+                            break;
+
+                        int expected = cur;
+                        if (L->pendingPattern.compare_exchange_strong (expected, -1,
+                                                                       std::memory_order_acq_rel))
+                        {
+                            want = cur;
+                            break;
+                        }
+                    }
+
+                    if (want >= 0)
+                    {
+                        if (L->active.exchange (false, std::memory_order_acq_rel))
+                            releaseLoopNotes (i, *L);
+
+                        L->loopStartBeat = at;
+                        L->activePattern.store (want, std::memory_order_relaxed);
+                        L->sounding.fill (0);
+                        L->active.store (true, std::memory_order_release);
+                    }
+                }
+            }
+        }
+
+        if (! L->active.load (std::memory_order_acquire))
+            continue;
+
+        {
+            const double lb0 = (double) L->loopBeats;
+            if (lb0 > 1.0e-4)
+            {
+                const double d = (b0 - L->loopStartBeat) / lb0;
+                const double frac = d - std::floor (d);
+                L->progress.store ((float) frac, std::memory_order_relaxed);
+            }
+        }
+
+        for (int attempt = 0; attempt < 3; ++attempt)
+        {
+            const auto g1 = L->generation.load (std::memory_order_acquire);
+            if ((g1 & 1u) != 0)
+                continue;
+
+            const int count   = L->count;
+            const float loopB = L->loopBeats;
+
+            struct Segment { double start, end, base; };
+            Segment segs[64];
+            int segCount = 0;
+            double iterBase = L->loopStartBeat;
+            double cursor   = juce::jmax (b0, iterBase);
+
+            if (loopB > 1.0e-4f)
+            {
+                while (cursor < b1 && segCount < 64)
+                {
+                    const double iterEnd = iterBase + (double) loopB;
+                    const double segEnd  = juce::jmin (b1, iterEnd);
+
+                    if (segEnd > cursor)
+                        segs[segCount++] = { cursor, segEnd, iterBase };
+
+                    cursor   = segEnd;
+                    iterBase = iterEnd;
+                }
+            }
+
+            const auto g2 = L->generation.load (std::memory_order_acquire);
+            if (g1 != g2 || (g2 & 1u) != 0)
+                continue;
+
+            auto& s = slots[(size_t) i];
+
+            for (int si = 0; si < segCount; ++si)
+            {
+                const auto& seg = segs[si];
+
+                for (int k = 0; k < count; ++k)
+                {
+                    const auto& e = L->events[(size_t) k];
+                    const double absBeat = seg.base + (double) e.beat;
+
+                    if (absBeat < seg.start || absBeat >= seg.end)
+                        continue;
+
+                    const double frac = (b1 > b0) ? (absBeat - b0) / (b1 - b0) : 0.0;
+                    const int ns = juce::jmax (1, numSamples);
+                    const int delay = juce::jlimit (0, ns - 1, (int) (frac * (double) ns));
+                    const int pitch = juce::jlimit (0, 127, (int) e.pitch);
+
+                    if (e.type == 0)
+                    {
+                        s.synth.noteOn (pitch, (float) e.velocity / 127.0f, delay);
+                        L->sounding[(size_t) pitch] = 1;
+                    }
+                    else
+                    {
+                        s.synth.noteOff (pitch, delay);
+                        L->sounding[(size_t) pitch] = 0;
+                    }
+
+                    ++scheduled;
+                }
+            }
+
+            L->loopStartBeat = iterBase;
+            break;
+        }
+    }
+
+    return scheduled;
+}
+
 void AudioEngine::collectEvents (int slotIndex, float beatStart, float beatEnd,
                                  SeqEvent* out, int maxOut, int& outCount)
 {
@@ -306,6 +645,7 @@ void AudioEngine::stop()
 {
     playing.store (false, std::memory_order_relaxed);
     transportResetFlag.store (true, std::memory_order_relaxed);
+    resetSessionLoops();
 }
 
 void AudioEngine::syncTransport()
@@ -324,6 +664,8 @@ void AudioEngine::syncTransport()
 // ---------------------------------------------------------------------------
 void AudioEngine::valueTreeChildAdded (juce::ValueTree& parent, juce::ValueTree& child)
 {
+    rebuildActiveLoops();
+
     if (parent == tracksTree)
     {
         activateFromTree (child);
@@ -343,11 +685,21 @@ void AudioEngine::valueTreeChildRemoved (juce::ValueTree& parent, juce::ValueTre
 {
     juce::ignoreUnused (index);
 
+    rebuildActiveLoops();
+
     if (parent == tracksTree)
     {
         auto slot = slotIndexFromTree (child);
         if (juce::isPositiveAndBelow (slot, kMaxSlots))
+        {
             slots[(size_t) slot].active.store (false, std::memory_order_release);
+
+            if (auto* L = sessionLoops[(size_t) slot]; L != nullptr)
+            {
+                L->pendingPattern.store (-1, std::memory_order_relaxed);
+                L->pendingStop.store (true, std::memory_order_relaxed);
+            }
+        }
 
         rebuildAllSequences();
     }
@@ -364,6 +716,8 @@ void AudioEngine::valueTreeChildRemoved (juce::ValueTree& parent, juce::ValueTre
 void AudioEngine::valueTreePropertyChanged (juce::ValueTree& tree, const juce::Identifier& prop)
 {
     juce::ignoreUnused (prop);
+
+    rebuildActiveLoops();
 
     if (tracksTree.isValid() && tree.getParent() == tracksTree)
     {
@@ -477,10 +831,11 @@ void AudioEngine::audioDeviceIOCallbackWithContext (const float* const* inputCha
         const double b0 = (double) posAtStart / sr * (bpmNow / 60.0);
         const double b1 = (double) (posAtStart + numSamples) / sr * (bpmNow / 60.0);
         const double blockBeats = b1 - b0;
+        const bool discontinuity = prevEndBeat < 0.0 || std::abs (b0 - prevEndBeat) > 1.0e-4;
 
         if (isPlaying)
         {
-            if (prevEndBeat < 0.0 || std::abs (b0 - prevEndBeat) > 1.0e-4)
+            if (discontinuity)
                 for (auto& s : slots)
                     s.synth.allOff();
 
@@ -514,6 +869,8 @@ void AudioEngine::audioDeviceIOCallbackWithContext (const float* const* inputCha
         {
             prevEndBeat = -1.0;
         }
+
+        processSession (b0, b1, numSamples, discontinuity);
 
         // --- ¿alguna pista en solo? ---------------------------------
         bool anySolo = false;
@@ -740,4 +1097,5 @@ void AudioEngine::audioDeviceStopped()
 {
     scratch.clear();
     playing.store (false, std::memory_order_relaxed);
+    resetSessionLoops();
 }

@@ -60,6 +60,20 @@ public:
     void previewNoteOn  (int slot, int pitch, float velocity01 = 0.8f);
     void previewNoteOff (int slot, int pitch);
 
+    // --- sesión (hilo de mensaje lanza/para; hilo de audio consume) -----
+    void launchSessionClip (int slot, int patternUid);
+    void stopSessionClip (int slot);
+    void stopAllSessionClips();
+    int  processSession (double beatStart, double beatEnd, int numSamples, bool discontinuity = false);
+
+    bool  isSessionActive (int slot) const;
+    int   sessionQueuedPatternFor (int slot) const;
+    int   sessionPatternFor (int slot) const;
+    float sessionLoopProgress (int slot) const;
+
+    void  setSessionQuantize (float beats) { sessionQuantize.store (juce::jmax (0.0f, beats), std::memory_order_relaxed); }
+    float getSessionQuantize() const       { return sessionQuantize.load (std::memory_order_relaxed); }
+
     // --- transporte ---------------------------------------------------
     void play()  { playing.store (true,  std::memory_order_relaxed); }
     void stop();
@@ -106,6 +120,23 @@ public:
     void audioDeviceStopped() override;
 
 private:
+    struct SessionLoop
+    {
+        static constexpr int kMaxLoopEvents = 4096;
+
+        std::array<SeqEvent, kMaxLoopEvents> events {};
+        int count = 0;
+        float loopBeats = 4.0f;
+        std::atomic<uint32_t> generation { 0 };
+        std::atomic<int>  pendingPattern { -1 };
+        std::atomic<bool> pendingStop { false };
+        std::atomic<bool> active { false };
+        std::atomic<int>  activePattern { -1 };
+        std::atomic<float> progress { 0.0f };
+        double loopStartBeat = 0.0;
+        std::array<uint8_t, 128> sounding {};
+    };
+
     void activateFromTree (const juce::ValueTree& trackTree);
     void syncSlotFromTree (const juce::ValueTree& trackTree);
     void syncTransport();
@@ -113,8 +144,12 @@ private:
 
     void rebuildSequence (int slotIndex);
     void rebuildAllSequences();
+    void rebuildLoop (int slotIndex, int patternUid);
+    void rebuildActiveLoops();
     void collectEvents (int slotIndex, float beatStart, float beatEnd,
                         SeqEvent* out, int maxOut, int& outCount);
+    void releaseLoopNotes (int slotIndex, SessionLoop& loop);
+    void resetSessionLoops();
 
     void valueTreeChildAdded (juce::ValueTree& parent, juce::ValueTree& child) override;
     void valueTreeChildRemoved (juce::ValueTree& parent, juce::ValueTree& child, int index) override;
@@ -127,9 +162,11 @@ private:
     std::vector<float> scratch;   // preasignada en aboutToStart
 
     std::array<SlotSequence*, kMaxSlots> seqs {};   // sólo pistas MIDI
+    std::array<SessionLoop*, kMaxSlots> sessionLoops {};
     std::vector<SeqEvent> seqScratch;              // sólo hilo de mensaje
     SynthCommandQueue<256> synthQueue;
     std::atomic<bool> transportResetFlag { false };
+    std::atomic<float> sessionQuantize { 4.0f };
 
     SpectrumAnalyzer spectrum;    // FFT del master (hilo audio empuja, UI lee)
 

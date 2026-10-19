@@ -27,6 +27,71 @@ struct SlotSequence
 
 namespace MidiSequence
 {
+    inline void sortEvents (SeqEvent* out, int n)
+    {
+        std::sort (out, out + n, [] (const SeqEvent& a, const SeqEvent& b)
+        {
+            if (a.beat != b.beat)
+                return a.beat < b.beat;
+            return a.type > b.type;
+        });
+    }
+
+    inline int buildLoop (const juce::ValueTree& patternsTree, int patternUid,
+                          SeqEvent* out, int maxEvents, float& loopBeats)
+    {
+        loopBeats = 4.0f;
+
+        if (! out || maxEvents <= 0 || ! patternsTree.isValid() || patternUid < 0)
+            return 0;
+
+        juce::ValueTree pattern;
+        for (int p = 0; p < patternsTree.getNumChildren(); ++p)
+        {
+            auto cand = patternsTree.getChild (p);
+            if ((int) cand.getProperty (IDs::uid, -1) == patternUid)
+            {
+                pattern = cand;
+                break;
+            }
+        }
+
+        if (! pattern.isValid())
+            return 0;
+
+        loopBeats = juce::jmax (0.25f, (float) (double) pattern.getProperty (IDs::patternLen, 4.0));
+
+        int n = 0;
+
+        for (int i = 0; i < pattern.getNumChildren(); ++i)
+        {
+            auto note = pattern.getChild (i);
+            if (note.getType() != juce::Identifier (IDs::note))
+                continue;
+
+            const float on = (float) (double) note.getProperty (IDs::start, 0.0);
+            if (on < -1.0e-6f || on >= loopBeats)
+                continue;
+
+            const float len = juce::jmax (0.01f, (float) (double) note.getProperty (IDs::duration, 0.25));
+            const float off = juce::jmin (on + len, loopBeats);
+
+            if (n >= maxEvents)
+                return n;
+
+            out[n++] = { juce::jmax (0.0f, on), (int16_t) (int) note.getProperty (IDs::pitch, 60), 0,
+                         (uint8_t) juce::jlimit (0, 127, (int) (127.0 * (double) note.getProperty (IDs::velocity, 0.8))) };
+
+            if (n >= maxEvents)
+                return n;
+
+            out[n++] = { off, (int16_t) (int) note.getProperty (IDs::pitch, 60), 1, 0 };
+        }
+
+        sortEvents (out, n);
+        return n;
+    }
+
     // Construye los eventos de un slot a partir de los clips del track y las notas
     // de los patrones referenciados. Devuelve el número de eventos escritos.
     inline int build (const juce::ValueTree& tracksTree, const juce::ValueTree& patternsTree,
@@ -94,12 +159,7 @@ namespace MidiSequence
             }
         }
 
-        std::sort (out, out + n, [] (const SeqEvent& a, const SeqEvent& b)
-        {
-            if (a.beat != b.beat)
-                return a.beat < b.beat;
-            return a.type > b.type;   // offs antes de ons en el mismo pulso
-        });
+        sortEvents (out, n);
 
         return n;
     }
