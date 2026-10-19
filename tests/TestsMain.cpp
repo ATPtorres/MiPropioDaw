@@ -3,9 +3,13 @@
 
 #include "../src/core/ProjectState.h"
 #include "../src/model/TrackList.h"
+#include "../src/model/PatternLibrary.h"
 #include "../src/audio/AudioEngine.h"
 #include "../src/audio/ProChannel.h"
 #include "../src/audio/SpectrumAnalyzer.h"
+#include "../src/audio/MidiSynth.h"
+#include "../src/audio/MidiSequence.h"
+#include "../src/ui/widgets/Scales.h"
 #include "../src/core/IDs.h"
 
 static int gFailures = 0;
@@ -361,9 +365,243 @@ static void testProChannelValueTreeIntegration()
     check (std::abs (proc.params.eqMidGain.load() - 6.0f) < 0.01f, "eqMidGain propagado");
 }
 
+// ---------------------------------------------------------------------------
+// Tests de MIDI — Fase 3
+// ---------------------------------------------------------------------------
+static void testPatternNotes()
+{
+    std::cout << "[test] patrones y notas\n";
+
+    ProjectState state;
+    AudioEngine engine;
+    TrackList tracks (state, engine);
+    engine.attachTracks (tracks.getTracks());
+    engine.attachPatterns (state.patterns());
+
+    PatternLibrary lib (state);
+
+    auto pattern = lib.addPattern ("Lead", 2);
+    check (pattern.isValid(), "patrón creado");
+    check (lib.patternCount() == 1, "conteo de patrones == 1");
+    check (lib.uidOf (pattern) > 0, "uid asignado");
+    check (lib.activePatternUid() == lib.uidOf (pattern), "patrón activo tras crear");
+    check (lib.patternLengthBeats (pattern) == 8.0, "longitud 2 compases = 8 pulsos");
+
+    auto n1 = lib.addNote (pattern, 60, 0.0, 1.0, 0.8);
+    lib.addNote (pattern, 64, 1.0, 1.0, 0.6);
+    lib.addNote (pattern, 67, 2.0, 2.0, 1.0);
+
+    check (lib.noteCount (pattern) == 3, "3 notas creadas");
+    check ((int) n1.getProperty (IDs::pitch) == 60, "pitch guardado");
+    check ((double) n1.getProperty (IDs::start) == 0.0, "posición guardada");
+
+    auto hit = lib.noteAt (pattern, 64, 1.5);
+    check (hit.isValid() && (int) hit.getProperty (IDs::pitch) == 64, "hit test encuentra la nota");
+
+    state.setProperty (n1, IDs::pitch, 72, "Move note");
+    check ((int) pattern.getChild (0).getProperty (IDs::pitch) == 72, "mueve nota");
+    check (lib.noteAt (pattern, 60, 0.0).isValid() == false, "hit test actualizado");
+
+    state.performUndo();
+    check ((int) pattern.getChild (0).getProperty (IDs::pitch) == 60, "deshacer mueve nota");
+
+    lib.deleteNote (pattern, n1);
+    check (lib.noteCount (pattern) == 2, "borra nota");
+    state.performUndo();
+    check (lib.noteCount (pattern) == 3, "deshacer borra nota");
+}
+
+static void testMakeUnique()
+{
+    std::cout << "[test] Make Unique\n";
+
+    ProjectState state;
+    AudioEngine engine;
+    TrackList tracks (state, engine);
+    engine.attachTracks (tracks.getTracks());
+    engine.attachPatterns (state.patterns());
+
+    PatternLibrary lib (state);
+
+    auto pattern = lib.addPattern ("Bass", 1);
+    lib.addNote (pattern, 36, 0.0, 1.0, 0.9);
+    lib.addNote (pattern, 43, 2.0, 1.0, 0.9);
+
+    auto midiTrack = tracks.addTrack ("midi");
+    auto clip = lib.addClip (midiTrack, lib.uidOf (pattern), 0.0, 4.0);
+    check (clip.isValid(), "clip creado");
+    check (lib.clipCount() == 1, "conteo de clips == 1");
+
+    check (lib.patternInUse (lib.uidOf (pattern)), "patrón en uso detectado");
+    check (! lib.deletePattern (pattern), "borrar patrón en uso bloqueado");
+
+    check (lib.makeUnique (clip), "make unique ejecuta");
+
+    const int newUid = (int) clip.getProperty (IDs::patternUid, -1);
+    check (newUid != lib.uidOf (pattern), "clip apunta a patrón nuevo");
+    check (lib.patternCount() == 2, "patrón duplicado existe");
+
+    auto newPattern = lib.patternForUid (newUid);
+    check (lib.noteCount (newPattern) == lib.noteCount (pattern), "notas copiadas");
+
+    lib.addNote (newPattern, 48, 3.0, 0.5, 0.5);
+    check (lib.noteCount (newPattern) == 3, "añade nota al patrón unique");
+    check (lib.noteCount (pattern) == 2, "el patrón original no cambia");
+
+    check (lib.deletePattern (pattern), "original ya no en uso se puede borrar");
+}
+
+static void testClipSerialization()
+{
+    std::cout << "[test] serialización de patrones, notas y clips\n";
+
+    ProjectState state;
+    AudioEngine engine;
+    TrackList tracks (state, engine);
+    engine.attachTracks (tracks.getTracks());
+    engine.attachPatterns (state.patterns());
+
+    PatternLibrary lib (state);
+
+    auto pattern = lib.addPattern ("Drums", 1);
+    lib.addNote (pattern, 36, 0.0, 0.25, 1.0);
+    lib.addNote (pattern, 38, 1.0, 0.25, 0.7);
+
+    auto midiTrack = tracks.addTrack ("midi");
+    lib.addClip (midiTrack, lib.uidOf (pattern), 4.0, 4.0);
+
+    auto file = juce::File::getSpecialLocation (juce::File::tempDirectory)
+                    .getChildFile ("miproiodaw_test_f3.dawproj");
+
+    check (state.save (file), "proyecto guardado");
+
+    ProjectState loaded;
+    check (loaded.load (file), "proyecto cargado");
+
+    PatternLibrary lib2 (loaded);
+    check (lib2.patternCount() == 1, "1 patrón restaurado");
+    check (lib2.clipCount() == 1, "1 clip restaurado");
+
+    auto p2 = lib2.patterns().getChild (0);
+    check (lib2.noteCount (p2) == 2, "2 notas restauradas");
+    check ((int) p2.getChild (0).getProperty (IDs::pitch) == 36, "pitch restaurado");
+    check ((double) p2.getChild (1).getProperty (IDs::start) == 1.0, "posición restaurada");
+
+    AudioEngine engine2;
+    engine2.attachTracks (loaded.tracks());
+    engine2.attachPatterns (loaded.patterns());
+
+    const int slot = (int) loaded.tracks().getChild (loaded.tracks().getNumChildren() - 1)
+                          .getProperty (IDs::mixerSlot, -1);
+    check (engine2.getSlot (slot).isMidi.load(), "slot marcado como MIDI");
+
+    file.deleteFile();
+}
+
+static void testMidiSequence()
+{
+    std::cout << "[test] secuencia MIDI del motor\n";
+
+    ProjectState state;
+    AudioEngine engine;
+    TrackList tracks (state, engine);
+    PatternLibrary lib (state);
+
+    auto pattern = lib.addPattern ("Seq", 1);
+    lib.addNote (pattern, 60, 0.0, 1.0, 1.0);
+    lib.addNote (pattern, 62, 1.0, 1.0, 1.0);
+
+    auto midiTrack = tracks.addTrack ("midi");
+    lib.addClip (midiTrack, lib.uidOf (pattern), 0.0, 4.0);
+
+    const int slot = (int) midiTrack.getProperty (IDs::mixerSlot, -1);
+
+    SeqEvent events[256];
+    const int n = MidiSequence::build (tracks.getTracks(), state.patterns(), slot, events, 256);
+
+    check (n == 4, "4 eventos (2 on + 2 off) (" + juce::String (n) + ")");
+    check (events[0].type == 0 && events[0].pitch == 60 && events[0].beat == 0.0f, "primer on en 0.0");
+    check (events[1].type == 1 && events[1].beat == 1.0f, "primer off en 1.0");
+    check (events[2].type == 0 && events[2].pitch == 62 && events[2].beat == 1.0f, "segundo on en 1.0");
+
+    // recorte al final del clip: nota que se extiende más allá del clip
+    lib.addNote (pattern, 64, 3.5, 2.0, 1.0);
+    const int n2 = MidiSequence::build (tracks.getTracks(), state.patterns(), slot, events, 256);
+    check (n2 == 6, "6 eventos tras añadir nota larga");
+    check (events[5].beat <= 4.0f, "off recortado al final del clip");
+
+    // clip de otra pista con otro patrón no contamina
+    auto other = lib.addPattern ("Other", 1);
+    lib.addNote (other, 72, 0.0, 1.0, 1.0);
+    auto midi2 = tracks.addTrack ("midi");
+    lib.addClip (midi2, lib.uidOf (other), 0.0, 4.0);
+
+    const int slot2 = (int) midi2.getProperty (IDs::mixerSlot, -1);
+    const int n3 = MidiSequence::build (tracks.getTracks(), state.patterns(), slot2, events, 256);
+    check (n3 == 2, "secuencia aislada por slot (" + juce::String (n3) + ")");
+}
+
+static void testMidiSynth()
+{
+    std::cout << "[test] sintetizador MIDI\n";
+
+    MidiSynth synth;
+    synth.prepare (48000.0);
+
+    std::vector<float> buf (512, 0.0f);
+    synth.noteOn (60, 1.0f);
+    synth.render (buf.data(), 512);
+
+    float maxAbs = 0.0f;
+    for (float v : buf)
+        maxAbs = std::max (maxAbs, std::abs (v));
+    check (maxAbs > 0.01f, "nota suena (max=" + juce::String (maxAbs, 4) + ")");
+
+    std::fill (buf.begin(), buf.end(), 0.0f);
+    synth.noteOff (60);
+    for (int i = 0; i < 40; ++i)
+    {
+        std::fill (buf.begin(), buf.end(), 0.0f);
+        synth.render (buf.data(), 512);
+    }
+
+    float maxTail = 0.0f;
+    for (float v : buf)
+        maxTail = std::max (maxTail, std::abs (v));
+    check (maxTail < maxAbs * 0.5f, "release decae (" + juce::String (maxTail, 4) + ")");
+
+    std::fill (buf.begin(), buf.end(), 0.0f);
+    synth.allOff();
+    synth.render (buf.data(), 512);
+    maxTail = 0.0f;
+    for (float v : buf)
+        maxTail = std::max (maxTail, std::abs (v));
+    check (maxTail < 1.0e-6f, "allOff silencia");
+
+    // cola de comandos
+    SynthCommandQueue<16> q;
+    check (q.push ({ 1, 60, 100, 0 }), "push ok");
+    SynthCommand c;
+    check (q.pop (c) && c.pitch == 60 && c.type == 0, "pop ok");
+    check (! q.pop (c), "cola vacía");
+}
+
+static void testScales()
+{
+    std::cout << "[test] escalas (scale highlighting)\n";
+
+    check (Scales::intervalsFor ("Major").size() == 7, "mayor tiene 7 grados");
+    check (Scales::inScale (60, 0, Scales::intervalsFor ("Major")), "C en Do mayor");
+    check (! Scales::inScale (61, 0, Scales::intervalsFor ("Major")), "C# fuera de Do mayor");
+    check (Scales::inScale (62, 0, Scales::intervalsFor ("Major")), "D en Do mayor");
+    check (Scales::inScale (0, 0, Scales::intervalsFor ("Off")), "escala Off = todas");
+    check (Scales::noteName (60) == "C4", "nombre de nota C4");
+    check (Scales::noteName (69) == "A4", "nombre de nota A4");
+}
+
 int main (int, char**)
 {
-    std::cout << "=== MiPropioDaw — tests de Fase 1 + 2 ===\n";
+    std::cout << "=== MiPropioDaw — tests de Fase 1 + 2 + 3 ===\n";
 
     testTrackCreationAndRouting();
     testUndoRedo();
@@ -377,6 +615,14 @@ int main (int, char**)
     testProChannelSaturation();
     testSpectrumAnalyzer();
     testProChannelValueTreeIntegration();
+
+    // Fase 3
+    testPatternNotes();
+    testMakeUnique();
+    testClipSerialization();
+    testMidiSequence();
+    testMidiSynth();
+    testScales();
 
     std::cout << "\n" << (gChecks - gFailures) << "/" << gChecks << " comprobaciones correctas\n";
 

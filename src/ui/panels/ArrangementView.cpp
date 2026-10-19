@@ -44,6 +44,49 @@ void ArrangementView::TimelineContent::paint (juce::Graphics& g)
         g.fillRect (0, y, (int) w, 1);
     }
 
+    // --- clips MIDI -----------------------------------------------------
+    {
+        const int clipRowH = Theme::trackRowHeight;
+
+        for (int i = 0; i < owner.tracksTree.getNumChildren(); ++i)
+        {
+            auto track = owner.tracksTree.getChild (i);
+            const auto baseY = (float) (i * clipRowH);
+
+            const auto colour = juce::Colour ((juce::uint32) (juce::int64) track.getProperty (IDs::colour, (juce::int64) 0xff4fc3f7));
+
+            for (int c = 0; c < track.getNumChildren(); ++c)
+            {
+                auto clip = track.getChild (c);
+                if (clip.getType() != juce::Identifier (IDs::clip))
+                    continue;
+
+                const auto start = (double) clip.getProperty (IDs::start, 0.0);
+                const auto len   = (double) clip.getProperty (IDs::duration, 4.0);
+
+                const auto cx = (float) (start * px);
+                const auto cw = juce::jmax (6.0f, (float) (len * px) - 2.0f);
+                const auto rect = juce::Rectangle<float> (cx, baseY + 4.0f, cw, (float) clipRowH - 9.0f);
+
+                auto pat = owner.library.patternForUid ((int) clip.getProperty (IDs::patternUid, -1));
+                const auto patName = pat.getProperty (IDs::name, "?").toString();
+
+                g.setColour (colour.withAlpha (0.75f));
+                g.fillRoundedRectangle (rect, 4.0f);
+
+                g.setColour (colour.brighter (0.5f));
+                g.fillRoundedRectangle (rect.withWidth (4.0f).reduced (1.0f, 3.0f), 2.0f);
+
+                g.setColour (juce::Colours::black.withAlpha (0.6f));
+                g.setFont (Theme::font (11.0f, true));
+                g.drawText (patName, rect.reduced (8.0f, 0.0f), juce::Justification::centredLeft, true);
+
+                g.setColour (colour.brighter (0.2f));
+                g.drawRoundedRectangle (rect, 4.0f, 1.0f);
+            }
+        }
+    }
+
     // --- estado vacío ------------------------------------------------
     if (owner.headers.empty())
     {
@@ -72,12 +115,133 @@ void ArrangementView::TimelineContent::paint (juce::Graphics& g)
 
 void ArrangementView::TimelineContent::mouseDown (const juce::MouseEvent& e)
 {
-    if (e.mods.isLeftButtonDown())
+    if (e.mods.isRightButtonDown())
     {
-        const double beats = (double) e.x / (double) Theme::pxPerBeat;
-        owner.engine.setPlayheadBeats (beats);
-        repaint();
+        auto hit = owner.hitClip (e.x, e.y);
+        if (hit.isValid())
+            owner.library.deleteClip (hit.track, hit.clip);
+
+        return;
     }
+
+    if (! e.mods.isLeftButtonDown())
+        return;
+
+    auto hit = owner.hitClip (e.x, e.y);
+
+    if (hit.isValid())
+    {
+        owner.dragClip = hit.clip;
+        owner.dragClipTrack = hit.track;
+        owner.dragDownX = e.x;
+        owner.dragOrigStart = (double) hit.clip.getProperty (IDs::start, 0.0);
+        owner.dragOrigLen   = (double) hit.clip.getProperty (IDs::duration, 4.0);
+        owner.clipDrag = hit.rightEdge ? ClipDrag::resize : ClipDrag::move;
+
+        owner.state.undo.beginNewTransaction ("Edit clip");
+        return;
+    }
+
+    const int trackIndex = owner.trackIndexAtY (e.y);
+    auto active = owner.library.activePattern();
+
+    if (juce::isPositiveAndBelow (trackIndex, owner.tracksTree.getNumChildren())
+        && active.isValid())
+    {
+        auto track = owner.tracksTree.getChild (trackIndex);
+        if (track.getProperty (IDs::type).toString() == "midi")
+        {
+            const double start = snapBeat ((double) e.x / (double) Theme::pxPerBeat);
+            auto clip = owner.library.addClip (track, owner.library.uidOf (active), start,
+                                               owner.library.patternLengthBeats (active));
+
+            if (clip.isValid())
+            {
+                owner.dragClip = clip;
+                owner.dragClipTrack = track;
+                owner.dragDownX = e.x;
+                owner.dragOrigStart = start;
+                owner.dragOrigLen = (double) clip.getProperty (IDs::duration, 4.0);
+                owner.clipDrag = ClipDrag::move;
+            }
+            return;
+        }
+    }
+
+    const double beats = (double) e.x / (double) Theme::pxPerBeat;
+    owner.engine.setPlayheadBeats (beats);
+    repaint();
+}
+
+void ArrangementView::TimelineContent::mouseDrag (const juce::MouseEvent& e)
+{
+    if (owner.clipDrag == ClipDrag::none || ! owner.dragClip.isValid())
+        return;
+
+    if (owner.clipDrag == ClipDrag::move)
+    {
+        const double delta = ((double) (e.x - owner.dragDownX)) / (double) Theme::pxPerBeat;
+        owner.state.setProperty (owner.dragClip, IDs::start,
+                                 juce::jmax (0.0, snapBeat (owner.dragOrigStart + delta)),
+                                 "Move clip", 1);
+    }
+    else
+    {
+        const double endPos = (double) e.x / (double) Theme::pxPerBeat;
+        const double newLen = snapBeat (endPos - (double) owner.dragClip.getProperty (IDs::start, 0.0));
+        owner.state.setProperty (owner.dragClip, IDs::duration,
+                                 juce::jmax (1.0, newLen), "Resize clip", 1);
+    }
+
+    repaint();
+}
+
+void ArrangementView::TimelineContent::mouseUp (const juce::MouseEvent&)
+{
+    owner.clipDrag = ClipDrag::none;
+    owner.dragClip = {};
+    owner.dragClipTrack = {};
+}
+
+double ArrangementView::snapBeat (double beats)
+{
+    return std::round (beats);
+}
+
+int ArrangementView::trackIndexAtY (int y) const
+{
+    return y / Theme::trackRowHeight;
+}
+
+ArrangementView::ClipHit ArrangementView::hitClip (int x, int y) const
+{
+    ClipHit hit;
+    hit.trackIndex = trackIndexAtY (y);
+
+    if (! juce::isPositiveAndBelow (hit.trackIndex, tracksTree.getNumChildren()))
+        return hit;
+
+    hit.track = tracksTree.getChild (hit.trackIndex);
+    const double beats = (double) x / (double) Theme::pxPerBeat;
+
+    for (int c = hit.track.getNumChildren() - 1; c >= 0; --c)
+    {
+        auto clip = hit.track.getChild (c);
+        if (clip.getType() != juce::Identifier (IDs::clip))
+            continue;
+
+        const double start = (double) clip.getProperty (IDs::start, 0.0);
+        const double len   = (double) clip.getProperty (IDs::duration, 4.0);
+
+        if (beats >= start && beats <= start + len)
+        {
+            hit.clip = clip;
+            hit.rightEdge = std::abs (beats - (start + len)) * Theme::pxPerBeat <= 6.0;
+            return hit;
+        }
+    }
+
+    return hit;
 }
 
 // ---------------------------------------------------------------------------
@@ -92,7 +256,7 @@ void ArrangementView::TimelineViewport::visibleAreaChanged (const juce::Rectangl
 // ArrangementView
 // ---------------------------------------------------------------------------
 ArrangementView::ArrangementView (ProjectState& stateToUse, AudioEngine& engineToUse, TrackList& list)
-    : state (stateToUse), engine (engineToUse), trackList (list),
+    : state (stateToUse), engine (engineToUse), trackList (list), library (stateToUse),
       tracksTree (trackList.getTracks()), transportTree (state.transport())
 {
     tracksLabel.setFont (Theme::font (11.0f, true));
@@ -244,16 +408,22 @@ void ArrangementView::valueTreeChildAdded (juce::ValueTree& parent, juce::ValueT
 {
     if (parent == tracksTree)
         rebuildHeaders();
+    else if (parent.getType() == juce::Identifier (IDs::track))
+        timelineContent.repaint();
 }
 
 void ArrangementView::valueTreeChildRemoved (juce::ValueTree& parent, juce::ValueTree&, int)
 {
     if (parent == tracksTree)
         rebuildHeaders();
+    else if (parent.getType() == juce::Identifier (IDs::track))
+        timelineContent.repaint();
 }
 
 void ArrangementView::valueTreePropertyChanged (juce::ValueTree& changedTree, const juce::Identifier& prop)
 {
     if (changedTree == transportTree && prop == juce::Identifier (IDs::timeSigNum))
         layoutContents();
+    else if (changedTree.getType() == juce::Identifier (IDs::clip))
+        timelineContent.repaint();
 }

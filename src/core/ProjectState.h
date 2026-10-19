@@ -27,7 +27,8 @@ public:
     void addChild (const juce::ValueTree& parent,
                    const juce::ValueTree& childToAdd,
                    int index,
-                   const juce::String& actionName);
+                   const juce::String& actionName,
+                   bool newTransaction = true);
 
     void removeChild (const juce::ValueTree& parent,
                       const juce::ValueTree& childToRemove,

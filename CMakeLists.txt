@@ -32,6 +32,7 @@ target_sources(MiPropioDaw PRIVATE
     src/core/ProjectState.cpp
     src/audio/AudioEngine.cpp
     src/model/TrackList.cpp
+    src/model/PatternLibrary.cpp
     src/ui/LookAndFeel_Dark.cpp
     src/ui/SplitPane.cpp
     src/ui/MainLayout.cpp
@@ -42,6 +43,7 @@ target_sources(MiPropioDaw PRIVATE
     src/ui/widgets/VUMeter.cpp
     src/ui/widgets/SpectrumDisplay.cpp
     src/ui/widgets/ProChannelPanel.cpp
+    src/ui/widgets/PianoRoll.cpp
     src/ui/panels/TransportBar.cpp
     src/ui/panels/BrowserPanel.cpp
     src/ui/panels/PatternSidebar.cpp
@@ -74,7 +76,8 @@ target_sources(MiPropioDawTests PRIVATE
     tests/TestsMain.cpp
     src/core/ProjectState.cpp
     src/audio/AudioEngine.cpp
-    src/model/TrackList.cpp)
+    src/model/TrackList.cpp
+    src/model/PatternLibrary.cpp)
 
 target_include_directories(MiPropioDawTests PRIVATE src)
 

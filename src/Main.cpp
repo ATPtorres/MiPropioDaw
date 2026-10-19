@@ -31,6 +31,7 @@ public:
 
         // modelo <-> motor
         audioEngine->attachTracks    (trackList->getTracks());
+        audioEngine->attachPatterns  (projectState->patterns());
         audioEngine->attachTransport (projectState->transport());
         audioEngine->attachMixer     (projectState->mixer());
 

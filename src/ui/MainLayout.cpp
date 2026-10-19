@@ -15,12 +15,12 @@ MainLayout::MainLayout (ProjectState& stateToUse, AudioEngine& engineToUse, Trac
 
     leftTabs.setColour (juce::TabbedComponent::backgroundColourId, Theme::panel());
     leftTabs.addTab ("Browser", Theme::panel(), new BrowserPanel(), true);
-    leftTabs.addTab ("Patterns", Theme::panel(), new PatternSidebar (stateToUse), true);
+    leftTabs.addTab ("Patterns", Theme::panel(), new PatternSidebar (stateToUse, engineToUse), true);
     leftTabs.setCurrentTabIndex (0);
 
     bottomTabs.setColour (juce::TabbedComponent::backgroundColourId, Theme::panel());
     bottomTabs.addTab ("Mixer", Theme::panel(), &mixerView, false);
-    bottomTabs.addTab ("MIDI Editor", Theme::panel(), new MidiEditorPanel(), true);
+    bottomTabs.addTab ("MIDI Editor", Theme::panel(), new MidiEditorPanel (stateToUse, engineToUse, trackList), true);
     bottomTabs.setCurrentTabIndex (0);
 }
 

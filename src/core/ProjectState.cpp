@@ -125,12 +125,15 @@ void ProjectState::setProperty (const juce::ValueTree& tree,
 void ProjectState::addChild (const juce::ValueTree& parent,
                              const juce::ValueTree& childToAdd,
                              int index,
-                             const juce::String& actionName)
+                             const juce::String& actionName,
+                             bool newTransaction)
 {
     if (! parent.isValid() || ! childToAdd.isValid())
         return;
 
-    undo.beginNewTransaction();
+    if (newTransaction)
+        undo.beginNewTransaction();
+
     undo.perform (new AddChildAction (parent, childToAdd, index), actionName);
     setModified (true);
 }

@@ -6,6 +6,8 @@
 #include <chrono>
 #include "ProChannel.h"
 #include "SpectrumAnalyzer.h"
+#include "MidiSynth.h"
+#include "MidiSequence.h"
 
 // Motor de audio de baja latencia.
 //  - El hilo de audio SOLO lee/writes atómicos (sin locks, sin allocations).
@@ -23,6 +25,7 @@ public:
     {
         std::atomic<bool>  reserved { false };
         std::atomic<bool>  active   { false };
+        std::atomic<bool>  isMidi   { false };
         std::atomic<int>   inputChannel { kNoInput };
         std::atomic<float> gain  { 1.0f };   // lineal
         std::atomic<float> pan   { 0.0f };   // -1..1
@@ -33,6 +36,7 @@ public:
         float tonePhase = 0.0f;              // sólo hilo de audio
 
         ProChannelProcessor proChannel;      // DSP por canal (sólo hilo de audio procesa)
+        MidiSynth synth;                     // sólo hilo de audio procesa
     };
 
     AudioEngine();
@@ -45,16 +49,21 @@ public:
 
     // --- modelo -------------------------------------------------------
     void attachTracks   (const juce::ValueTree& tracksTree);
+    void attachPatterns (const juce::ValueTree& patternsTree);
     void attachTransport(const juce::ValueTree& transportTree);
     void attachMixer    (const juce::ValueTree& mixerTree);
 
     int reserveSlot();   // hilo de mensaje; -1 si no quedan huecos
     const Slot& getSlot (int index) const { return slots[(size_t) juce::jlimit (0, kMaxSlots - 1, index)]; }
 
+    // --- preview MIDI (hilo de mensaje → hilo de audio) ----------------
+    void previewNoteOn  (int slot, int pitch, float velocity01 = 0.8f);
+    void previewNoteOff (int slot, int pitch);
+
     // --- transporte ---------------------------------------------------
     void play()  { playing.store (true,  std::memory_order_relaxed); }
-    void stop()  { playing.store (false, std::memory_order_relaxed); }
-    void togglePlay() { playing.store (! playing.load (std::memory_order_relaxed), std::memory_order_relaxed); }
+    void stop();
+    void togglePlay() { isPlaying() ? stop() : play(); }
     bool isPlaying() const { return playing.load (std::memory_order_relaxed); }
 
     double positionBeats() const;
@@ -102,15 +111,25 @@ private:
     void syncTransport();
     static int slotIndexFromTree (const juce::ValueTree& trackTree);
 
+    void rebuildSequence (int slotIndex);
+    void rebuildAllSequences();
+    void collectEvents (int slotIndex, float beatStart, float beatEnd,
+                        SeqEvent* out, int maxOut, int& outCount);
+
     void valueTreeChildAdded (juce::ValueTree& parent, juce::ValueTree& child) override;
     void valueTreeChildRemoved (juce::ValueTree& parent, juce::ValueTree& child, int index) override;
     void valueTreePropertyChanged (juce::ValueTree& tree, const juce::Identifier& prop) override;
 
     juce::AudioDeviceManager mgr;
-    juce::ValueTree tracksTree, transportTree, mixerTree;   // hilo de mensaje
+    juce::ValueTree tracksTree, patternsTree, transportTree, mixerTree;   // hilo de mensaje
 
     std::array<Slot, kMaxSlots> slots;
     std::vector<float> scratch;   // preasignada en aboutToStart
+
+    std::array<SlotSequence*, kMaxSlots> seqs {};   // sólo pistas MIDI
+    std::vector<SeqEvent> seqScratch;              // sólo hilo de mensaje
+    SynthCommandQueue<256> synthQueue;
+    std::atomic<bool> transportResetFlag { false };
 
     SpectrumAnalyzer spectrum;    // FFT del master (hilo audio empuja, UI lee)
 
@@ -133,6 +152,7 @@ private:
     float clickPhase = 0.0f;
     float clickEnv   = 0.0f;
     double clickFreq = 1100.0;
+    double prevEndBeat = -1.0;
     std::atomic<int> lastBeat { std::numeric_limits<int>::min() };
 
     bool deviceInitialised = false;

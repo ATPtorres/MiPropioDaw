@@ -28,9 +28,28 @@ inline constexpr const char* pan         = "pan";    // -1..1
 inline constexpr const char* mute        = "mute";
 inline constexpr const char* solo        = "solo";
 
-// patrones (barra lateral, lógica completa en Fase 3)
+// patrones
 inline constexpr const char* patterns    = "patterns";
 inline constexpr const char* pattern     = "pattern";
+inline constexpr const char* patternLen  = "patternLen"; // beats
+inline constexpr const char* activePattern = "activePattern"; // uid del patrón en edición
+
+// notas (hijas de pattern)
+inline constexpr const char* note        = "note";
+inline constexpr const char* pitch       = "pitch";     // 0..127
+inline constexpr const char* start       = "start";     // beats
+inline constexpr const char* duration    = "duration";  // beats
+inline constexpr const char* velocity    = "velocity";  // 0..1
+
+// clips de arreglo (hijos de track)
+inline constexpr const char* clip        = "clip";
+inline constexpr const char* uid         = "uid";
+inline constexpr const char* patternUid  = "patternUid";
+
+// estado de vista del editor MIDI
+inline constexpr const char* scaleRoot   = "scaleRoot"; // 0..11 (C..B)
+inline constexpr const char* scaleId     = "scaleId";   // nombre de escala
+inline constexpr const char* snapDiv     = "snapDiv";   // pulsos por unidad de rejilla
 
 // mixer
 inline constexpr const char* mixer       = "mixer";

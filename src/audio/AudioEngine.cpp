@@ -1,5 +1,6 @@
 #include "AudioEngine.h"
 #include "../core/IDs.h"
+#include <cstring>
 
 namespace
 {
@@ -15,6 +16,12 @@ AudioEngine::AudioEngine()  = default;
 AudioEngine::~AudioEngine()
 {
     mgr.removeAudioCallback (this);
+
+    for (auto& s : seqs)
+    {
+        delete s;
+        s = nullptr;
+    }
 
     if (deviceInitialised)
     {
@@ -85,6 +92,18 @@ void AudioEngine::attachTracks (const juce::ValueTree& tree)
         activateFromTree (tracksTree.getChild (i));
 }
 
+void AudioEngine::attachPatterns (const juce::ValueTree& tree)
+{
+    patternsTree.removeListener (this);
+    patternsTree = tree;
+
+    if (! patternsTree.isValid())
+        return;
+
+    patternsTree.addListener (this);
+    rebuildAllSequences();
+}
+
 void AudioEngine::attachTransport (const juce::ValueTree& tree)
 {
     transportTree.removeListener (this);
@@ -134,8 +153,16 @@ void AudioEngine::activateFromTree (const juce::ValueTree& trackTree)
     {
         auto& slot = slots[(size_t) index];
         slot.reserved.store (true, std::memory_order_relaxed);
+
+        const bool isMidiTrack = trackTree.getProperty (IDs::type).toString() == "midi";
+        slot.isMidi.store (isMidiTrack, std::memory_order_relaxed);
+
+        if (isMidiTrack && seqs[(size_t) index] == nullptr)
+            seqs[(size_t) index] = new SlotSequence();
+
         syncSlotFromTree (trackTree);
         syncProChannelFromTree (trackTree);
+        rebuildSequence (index);
         slot.active.store (true, std::memory_order_release);
     }
 }
@@ -191,6 +218,96 @@ void AudioEngine::syncProChannelFromTree (const juce::ValueTree& trackTree)
     p.satOutput.store  ((float) pc.getProperty (IDs::pcSatOutput, 0.0f),  std::memory_order_relaxed);
 }
 
+void AudioEngine::rebuildSequence (int slotIndex)
+{
+    if (! juce::isPositiveAndBelow (slotIndex, kMaxSlots))
+        return;
+
+    auto* seq = seqs[(size_t) slotIndex];
+    if (seq == nullptr || ! tracksTree.isValid())
+        return;
+
+    seqScratch.resize (SlotSequence::kMaxEvents);
+
+    const int n = MidiSequence::build (tracksTree, patternsTree, slotIndex,
+                                       seqScratch.data(), SlotSequence::kMaxEvents);
+
+    const auto g = seq->generation.load (std::memory_order_relaxed);
+    seq->generation.store (g + 1, std::memory_order_release);
+
+    seq->count = n;
+    std::memcpy (seq->events.data(), seqScratch.data(), (size_t) n * sizeof (SeqEvent));
+
+    seq->generation.store (g + 2, std::memory_order_release);
+}
+
+void AudioEngine::rebuildAllSequences()
+{
+    for (int i = 0; i < kMaxSlots; ++i)
+        if (seqs[(size_t) i] != nullptr)
+            rebuildSequence (i);
+}
+
+void AudioEngine::collectEvents (int slotIndex, float beatStart, float beatEnd,
+                                 SeqEvent* out, int maxOut, int& outCount)
+{
+    outCount = 0;
+
+    if (! juce::isPositiveAndBelow (slotIndex, kMaxSlots))
+        return;
+
+    auto* seq = seqs[(size_t) slotIndex];
+    if (seq == nullptr)
+        return;
+
+    for (int attempt = 0; attempt < 3; ++attempt)
+    {
+        const auto g1 = seq->generation.load (std::memory_order_acquire);
+        if ((g1 & 1u) != 0)
+            continue;
+
+        const int count = seq->count;
+        outCount = 0;
+
+        for (int i = 0; i < count && outCount < maxOut; ++i)
+        {
+            const auto& e = seq->events[(size_t) i];
+            if (e.beat >= beatStart && e.beat < beatEnd)
+                out[outCount++] = e;
+        }
+
+        const auto g2 = seq->generation.load (std::memory_order_acquire);
+        if (g1 == g2 && (g2 & 1u) == 0)
+            return;
+    }
+
+    outCount = 0;
+}
+
+void AudioEngine::previewNoteOn (int slot, int pitch, float velocity01)
+{
+    if (! juce::isPositiveAndBelow (slot, kMaxSlots))
+        return;
+
+    synthQueue.push ({ (int16_t) slot, (int16_t) pitch,
+                       (uint8_t) juce::jlimit (1, 127, (int) (127.0f * juce::jlimit (0.0f, 1.0f, velocity01))),
+                       0 });
+}
+
+void AudioEngine::previewNoteOff (int slot, int pitch)
+{
+    if (! juce::isPositiveAndBelow (slot, kMaxSlots))
+        return;
+
+    synthQueue.push ({ (int16_t) slot, (int16_t) pitch, 0, 1 });
+}
+
+void AudioEngine::stop()
+{
+    playing.store (false, std::memory_order_relaxed);
+    transportResetFlag.store (true, std::memory_order_relaxed);
+}
+
 void AudioEngine::syncTransport()
 {
     if (! transportTree.isValid())
@@ -208,7 +325,18 @@ void AudioEngine::syncTransport()
 void AudioEngine::valueTreeChildAdded (juce::ValueTree& parent, juce::ValueTree& child)
 {
     if (parent == tracksTree)
+    {
         activateFromTree (child);
+        rebuildAllSequences();
+    }
+    else if (tracksTree.isValid() && parent.getParent() == tracksTree)
+    {
+        rebuildAllSequences();
+    }
+    else if (patternsTree.isValid() && parent.getParent() == patternsTree)
+    {
+        rebuildAllSequences();
+    }
 }
 
 void AudioEngine::valueTreeChildRemoved (juce::ValueTree& parent, juce::ValueTree& child, int index)
@@ -217,9 +345,19 @@ void AudioEngine::valueTreeChildRemoved (juce::ValueTree& parent, juce::ValueTre
 
     if (parent == tracksTree)
     {
-        auto index = slotIndexFromTree (child);
-        if (juce::isPositiveAndBelow (index, kMaxSlots))
-            slots[(size_t) index].active.store (false, std::memory_order_release);
+        auto slot = slotIndexFromTree (child);
+        if (juce::isPositiveAndBelow (slot, kMaxSlots))
+            slots[(size_t) slot].active.store (false, std::memory_order_release);
+
+        rebuildAllSequences();
+    }
+    else if (tracksTree.isValid() && parent.getParent() == tracksTree)
+    {
+        rebuildAllSequences();
+    }
+    else if (patternsTree.isValid() && parent.getParent() == patternsTree)
+    {
+        rebuildAllSequences();
     }
 }
 
@@ -271,6 +409,7 @@ void AudioEngine::setPlayheadBeats (double beats)
 
     playheadSamples.store ((int64_t) juce::jmax (0.0, beats * 60.0 / b * sr), std::memory_order_relaxed);
     lastBeat.store (std::numeric_limits<int>::min(), std::memory_order_relaxed);
+    transportResetFlag.store (true, std::memory_order_relaxed);
 }
 
 juce::String AudioEngine::positionText() const
@@ -310,6 +449,71 @@ void AudioEngine::audioDeviceIOCallbackWithContext (const float* const* inputCha
     {
         const auto posAtStart = playheadSamples.load (std::memory_order_relaxed);
         const auto isPlaying  = playing.load (std::memory_order_relaxed);
+        const auto bpmNow     = bpm.load (std::memory_order_relaxed);
+
+        // --- comandos de preview y reset del transporte ----------------
+        {
+            SynthCommand cmd;
+            while (synthQueue.pop (cmd))
+            {
+                auto& s = slots[(size_t) juce::jlimit (0, kMaxSlots - 1, (int) cmd.slot)];
+
+                if (cmd.type == 0)
+                    s.synth.noteOn (cmd.pitch, (float) cmd.velocity / 127.0f);
+                else
+                    s.synth.noteOff (cmd.pitch);
+            }
+
+            if (transportResetFlag.exchange (false, std::memory_order_relaxed))
+            {
+                for (auto& s : slots)
+                    s.synth.allOff();
+
+                prevEndBeat = -1.0;
+            }
+        }
+
+        // --- eventos MIDI de los clips del arreglo ---------------------
+        const double b0 = (double) posAtStart / sr * (bpmNow / 60.0);
+        const double b1 = (double) (posAtStart + numSamples) / sr * (bpmNow / 60.0);
+        const double blockBeats = b1 - b0;
+
+        if (isPlaying)
+        {
+            if (prevEndBeat < 0.0 || std::abs (b0 - prevEndBeat) > 1.0e-4)
+                for (auto& s : slots)
+                    s.synth.allOff();
+
+            SeqEvent local[256];
+            int nLocal = 0;
+
+            for (int slotIdx = 0; slotIdx < kMaxSlots; ++slotIdx)
+            {
+                if (! slots[(size_t) slotIdx].active.load (std::memory_order_relaxed)
+                    || seqs[(size_t) slotIdx] == nullptr)
+                    continue;
+
+                collectEvents (slotIdx, (float) b0, (float) b1, local, 256, nLocal);
+
+                for (int k = 0; k < nLocal; ++k)
+                {
+                    const auto& e = local[k];
+                    const double frac = blockBeats > 0.0 ? (e.beat - b0) / blockBeats : 0.0;
+                    const int delay = juce::jlimit (0, numSamples - 1, (int) (frac * (double) numSamples));
+
+                    if (e.type == 0)
+                        slots[(size_t) slotIdx].synth.noteOn (e.pitch, (float) e.velocity / 127.0f, delay);
+                    else
+                        slots[(size_t) slotIdx].synth.noteOff (e.pitch, delay);
+                }
+            }
+
+            prevEndBeat = b1;
+        }
+        else
+        {
+            prevEndBeat = -1.0;
+        }
 
         // --- ¿alguna pista en solo? ---------------------------------
         bool anySolo = false;
@@ -353,6 +557,12 @@ void AudioEngine::audioDeviceIOCallbackWithContext (const float* const* inputCha
                     dst[i] = std::sin (phase * juce::MathConstants<float>::twoPi) * 0.25f;
                 }
                 s.tonePhase = phase;
+                haveSource = true;
+            }
+
+            if (! haveSource && s.isMidi.load (std::memory_order_relaxed))
+            {
+                s.synth.render (dst, numSamples);
                 haveSource = true;
             }
 
@@ -511,10 +721,13 @@ void AudioEngine::audioDeviceAboutToStart (juce::AudioIODevice* device)
     const auto wanted = (size_t) juce::jmax (4096, device->getCurrentBufferSizeSamples() * 4);
     scratch.resize (wanted);
 
-    // Prepara todos los ProChannel processors
+    // Prepara todos los ProChannel processors y sintetizadores
     for (auto& s : slots)
+    {
         s.proChannel.prepare (sampleRate.load (std::memory_order_relaxed),
                               device->getCurrentBufferSizeSamples());
+        s.synth.prepare (sampleRate.load (std::memory_order_relaxed));
+    }
 
     spectrum.prepare (sampleRate.load (std::memory_order_relaxed));
 
